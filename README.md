@@ -69,15 +69,15 @@
 | 掘金 | Markdown (CodeMirror 6) | ✅ 稳定（主世界 CM6 直写 + 主世界 paste 兜底） |
 | CSDN | Markdown (CodeMirror 6) | ✅ 稳定（主世界 CM6 实例直写，富文本模式自动兜底） |
 | 微信公众号 | 富文本 (ProseMirror) | ✅ 稳定（自动提取 token 跳转编辑页） |
-| 今日头条 | 富文本 | ⚠️ 平台改版频繁，失效时需更新选择器 |
-| 简书 | Markdown/富文本 | ⚠️ 实验性 |
+| 今日头条 | 富文本 |  ✅ 稳定 |
+| 简书 | Markdown/富文本 |  ✅ 稳定 |
 | 博客园 | Markdown/富文本 | ⚠️ 实验性（需账号已开通博客功能） |
 | B站专栏 | 富文本 (Quill) | ⚠️ 实验性 |
-| 百家号 | 富文本 | ⚠️ 实验性 |
-| 51CTO博客 | Markdown/富文本 | ⚠️ 实验性 |
+| 百家号 | 富文本 |  ✅ 稳定 |
+| 51CTO博客 | Markdown/富文本 |  ✅ 稳定 |
 | 开源中国 | Markdown/富文本 | ⚠️ 实验性 |
-| 腾讯云社区 | Markdown (CodeMirror) | ⚠️ 实验性 |
-| 阿里云社区 | Markdown/富文本 | ⚠️ 实验性 |
+| 腾讯云社区 | Markdown (CodeMirror) |  ✅ 稳定 |
+| 阿里云社区 | Markdown/富文本 |  ✅ 稳定 |
 | 本地演示页 | Markdown | 用于本地验证链路 |
 
 **复制模式**（内容自动复制到剪贴板 → 打开平台页面 → 手动 `Ctrl+V` 粘贴）：
