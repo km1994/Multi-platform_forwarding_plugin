@@ -1,0 +1,86 @@
+/* 目标页浮层样式：可拖拽 / 可最小化 / 可关闭，不挡编辑器按钮 */
+#multipost-overlay {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 2147483647;
+  width: 300px;
+  background: #1e1e2e;
+  color: #e8e8f0;
+  border: 1px solid #3a3a52;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow: hidden;
+  animation: mp-ov-in 0.25s ease;
+}
+@keyframes mp-ov-in {
+  from { transform: translateY(-8px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+#multipost-overlay.mp-ov-min {
+  width: 230px;
+  opacity: 0.92;
+}
+#multipost-overlay.mp-ov-min .mp-ov-body {
+  display: none;
+}
+.mp-ov-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #26263c;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+#multipost-overlay.mp-ov-min .mp-ov-header {
+  cursor: pointer;
+}
+.mp-ov-header:active { cursor: grabbing; }
+.mp-ov-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  background: #4f46e5;
+  color: #fff;
+  font-size: 12px;
+  flex: none;
+}
+.mp-ov-title {
+  flex: 1;
+  font-weight: 600;
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mp-ov-min, .mp-ov-close {
+  border: none;
+  background: transparent;
+  color: #9a9ab8;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  flex: none;
+}
+.mp-ov-min:hover, .mp-ov-close:hover { color: #fff; }
+.mp-ov-body { cursor: default; }
+.mp-ov-status {
+  padding: 10px 12px 2px;
+  color: #c7d2fe;
+}
+.mp-ov-status.mp-ov-ok { color: #6ee7a0; }
+.mp-ov-status.mp-ov-error { color: #ff8a8a; }
+.mp-ov-tip {
+  padding: 4px 12px 12px;
+  color: #8a8aa8;
+  font-size: 11.5px;
+}

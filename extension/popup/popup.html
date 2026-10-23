@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <link rel="stylesheet" href="popup.css" />
+  <title>多平台转发助手</title>
+</head>
+<body>
+  <header class="header">
+    <span class="logo">↗</span>
+    <div class="header-text">
+      <h1>多平台转发助手</h1>
+      <p>写一次，发多平台 · 参考 CSDN 同步助手</p>
+    </div>
+  </header>
+
+  <main class="main">
+    <section class="card">
+      <label class="label" for="title">标题</label>
+      <input id="title" type="text" placeholder="请输入文章标题" />
+
+      <div class="content-head">
+        <label class="label" for="markdown">正文（Markdown）</label>
+        <div class="content-actions">
+          <button id="upload-img" class="mini-btn" title="上传图片到图床并插入链接">🖼 图片</button>
+          <button id="import-md" class="mini-btn">导入 .md</button>
+          <button id="copy-html" class="mini-btn">复制 HTML</button>
+          <button id="copy-md" class="mini-btn">复制 MD</button>
+          <button id="preview-toggle" class="mini-btn" title="按主题预览排版效果">👁 预览</button>
+          <input id="image-input" type="file" accept="image/*" multiple hidden />
+          <input id="file-input" type="file" accept=".md,.markdown,.txt" hidden />
+        </div>
+      </div>
+      <textarea id="markdown" placeholder="# 粘贴或编写 Markdown 正文…&#10;支持粘贴 / 拖拽 / 点按钮上传图片（自动传图床并插入外链）" spellcheck="false"></textarea>
+      <div class="drop-hint hidden" id="drop-hint">松开鼠标，上传图片到图床</div>
+      <div id="img-status" class="img-status hidden"></div>
+
+      <div id="preview-panel" class="preview-panel hidden">
+        <div class="preview-bar">
+          <span class="preview-label">主题</span>
+          <select id="theme-select"></select>
+          <label class="apply-theme" title="同步时把主题样式内联到富文本平台（公众号/知乎/头条生效）">
+            <input id="apply-theme" type="checkbox" /> 同步套用
+          </label>
+          <button id="copy-rich" class="mini-btn" title="复制排版后的富文本（含公式），到目标平台正文区直接 Ctrl+V">⧉ 复制正文</button>
+        </div>
+        <div id="preview-body" class="preview-body"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="label-row">
+        <span class="label">图床设置</span>
+        <div class="content-actions">
+          <button id="bed-test" class="mini-btn" title="上传一张测试图，验证图床配置是否可用">测试</button>
+          <button id="bed-toggle" class="mini-btn">展开</button>
+        </div>
+      </div>
+      <div id="bed-guide" class="bed-guide">
+        <b>怎么用？</b>三步即成：
+        ① 选一个图床——推荐 <b>freeimage</b>（免注册、永久有效）；<b>Catbox</b> 风控较激进（可能返回 Invalid uploader）；
+        ② 写正文时「粘贴 / 拖拽图片进正文框」或点上方「🖼 图片」按钮；
+        ③ 图片自动上传并变成 <code>![](外链)</code> 插入正文，点「测试」可随时验证图床可用性。
+        上传失败会<b>自动改用其他可用图床</b>（如 catbox 风控返回 Invalid uploader / SSL 失败时），无需手动重试；
+        若提示全部失败，多为当前网络无法访问境外图床，可注册 ImgBB / SM.MS 填入密钥或配置自定义接口。
+        注：SM.MS 匿名上传已被官方停用，需免费注册领 Token 才能用。
+        注：CSDN 等平台会「转存」外链图到自己 CDN，需图床国内可达——推荐 <b>ImgBB / SM.MS</b>，catbox 直链常转存失败。
+      </div>
+      <div id="bed-panel" class="hidden">
+        <label class="bed-label" for="bed-provider">图床类型</label>
+        <select id="bed-provider">
+          <option value="freeimage" selected>freeimage.host（免注册 · 永久 · 32MB/图）推荐</option>
+          <option value="catbox">Catbox（免注册 · 200MB/图 · 风控较激进）</option>
+          <option value="imgbb">ImgBB（需免费注册领 Key · 无数量限制）</option>
+          <option value="smms">SM.MS（需注册领 Token）</option>
+          <option value="custom">自定义接口</option>
+        </select>
+        <div id="bed-catbox" class="bed-fields">
+          <div class="bed-tip">免注册、无数量限制、单图最大 200MB、链接永久。直链形如 files.catbox.moe/xxx.png。
+          注意：个别网络环境访问 catbox.moe 会 SSL 失败，此时换 freeimage.host 即可。</div>
+        </div>
+        <div id="bed-freeimage" class="bed-fields">
+          <input id="bed-freeimage-key" type="text" placeholder="API Key（可选，已内置公共 Key；可在 freeimage.host 注册自己的）" />
+          <div class="bed-tip">免注册即用（内置公共 Key）；如遇公共 Key 失效，到 freeimage.host 免费注册换取专属 Key 填入。</div>
+        </div>
+        <div id="bed-imgbb" class="bed-fields">
+          <input id="bed-imgbb-key" type="text" placeholder="API Key（必填）：api.imgbb.com 免费注册获取" />
+          <div class="bed-tip">注册后到 api.imgbb.com → Dashboard → API 复制 Key；无数量限制、单图 32MB、永久有效。</div>
+        </div>
+        <div id="bed-smms" class="bed-fields">
+          <input id="bed-smms-token" type="text" placeholder="SM.MS API Token（必填，匿名上传已被官方停用）" />
+          <div class="bed-tip">sm.ms 免费注册 → Dashboard → API Keys 复制 Token；单图 5MB、每分钟限速。</div>
+        </div>
+        <div id="bed-custom" class="bed-fields hidden">
+          <input id="bed-custom-url" type="text" placeholder="POST 接口地址，如 https://api.example.com/upload" />
+          <input id="bed-custom-header-name" type="text" placeholder="鉴权 Header 名（可选，如 Authorization）" />
+          <input id="bed-custom-header-value" type="text" placeholder="鉴权 Header 值（可选）" />
+          <input id="bed-custom-path" type="text" placeholder="返回 JSON 里链接的字段路径（默认 data.url）" />
+          <div class="bed-tip">以 multipart/form-data、字段名 file 发送；保存时会请求该域名的访问权限。</div>
+        </div>
+        <button id="bed-save" class="bed-save-btn">保存图床设置</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="label-row">
+        <span class="label">同步平台</span>
+        <span class="label-sub"><i class="dot-exp">!</i> 实验性 · <i class="dot-copy">⧉</i> 复制模式（自动复制，打开后手动粘贴）</span>
+      </div>
+      <div id="platform-grid" class="platform-grid"></div>
+    </section>
+
+    <button id="publish" class="publish-btn">🚀 一键同步到勾选平台</button>
+
+    <section id="progress-card" class="card hidden">
+      <div class="label-row">
+        <span class="label">同步进度</span>
+        <button id="export-log" class="mini-btn" title="导出诊断日志（.txt），发给别人或存档排查问题">🧾 导出日志</button>
+      </div>
+      <ul id="progress-list" class="progress-list"></ul>
+      <div class="log-tip">各平台失败原因已写入本地诊断日志，点「导出日志」保存排查。</div>
+    </section>
+
+    <section class="card">
+      <div class="label-row">
+        <span class="label">最近记录</span>
+        <div class="content-actions">
+          <button id="export-log2" class="mini-btn">🧾 导出日志</button>
+          <button id="clear-history" class="mini-btn">清空</button>
+        </div>
+      </div>
+      <ul id="history-list" class="history-list"></ul>
+    </section>
+  </main>
+
+  <footer class="footer">填充 ≠ 发布：各平台会自动打开并填好内容，需你人工确认后点击「发布」。</footer>
+
+  <style id="preview-style"></style>
+  <script src="../lib/marked.min.js"></script>
+  <script src="../common/platforms.js"></script>
+  <script src="../common/themes.js"></script>
+  <script src="../vendor/mathjax/mathjax-config.js"></script>
+  <script src="../vendor/mathjax/tex-svg.js"></script>
+  <script src="../common/formulas.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
