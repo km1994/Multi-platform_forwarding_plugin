@@ -9,7 +9,9 @@ if (!window.MathJax) {
       tags: 'ams'
     },
     svg: { fontCache: 'none' },
-    options: { renderActions: { addMenu: [0, '', ''] } },
+    // 禁用 assistive MathML：mjx-container 默认附带的 <mjx-assistive-mml>
+    // 会被公众号编辑器按文本拍平，公式变成 "+ 号" 乱码（0.4.9 实测事故）
+    options: { renderActions: { addMenu: [0, '', ''], assistiveMml: [] } },
     startup: { typeset: false }
   };
 }

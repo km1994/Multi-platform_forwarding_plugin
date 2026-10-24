@@ -534,7 +534,9 @@
    * （"上传失败"），PNG 可正常转存；\dpi{150} 保证清晰度。
    */
   function latexMdToImg(md) {
-    const enc = (s) => encodeURIComponent(s.trim()).replace(/%20/g, '+');
+    // 空格必须编码为 %20：codecogs 把查询串里的 + 当字面加号渲染
+    //（0.4.10 之前空格转 + 曾导致公式里冒出大量 + 号）
+    const enc = (s) => encodeURIComponent(s.trim());
     const img = (tex, display) => {
       tex = tex.replace(/\\mathm\b/g, '\\mathrm'); // 常见笔误修正
       const style = display
@@ -904,6 +906,75 @@
     return { ok: (el.value || el.textContent || '').trim().length > 0, message: '' };
   }
 
+  /* ============ 图片直传（平台自有图床）通用工具：本节为纯新增，不改动任何既有函数 ============ */
+
+  /** 提取 Markdown 里所有外链图片 URL */
+  function extractMdImages(md) {
+    const re = /(!\[[^\]]*\]\()(https?:\/\/[^)\s]+)(\))/g;
+    const out = [];
+    let m;
+    while ((m = re.exec(md || '')) !== null) out.push(m[2]);
+    return out;
+  }
+
+  /** 按 url→新url 映射替换 Markdown 里的图片地址 */
+  function replaceMdImages(md, map) {
+    return String(md || '').replace(/(!\[[^\]]*\]\()(https?:\/\/[^)\s]+)(\))/g, (all, pre, url, post) =>
+      (map && map[url]) ? pre + map[url] + post : all);
+  }
+
+  /** 按 url→新url 映射替换 HTML 里 <img> 的 src（富文本兜底路径与 Markdown 用同一份重传映射） */
+  function replaceHtmlImgUrls(html, map) {
+    return String(html || '').replace(/(<img[^>]*?\ssrc=)(["'])(https?:\/\/[^"']+)\2/gi, (all, pre, q, url) =>
+      (map && map[url]) ? pre + q + map[url] + q : all);
+  }
+
+  /** 页面侧下载图片为 dataURL（依赖目标图站返回 CORS 头；被拒时由调用方走后台兜底） */
+  async function fetchImageAsDataUrl(url) {
+    const resp = await fetch(url, { credentials: 'omit', mode: 'cors' });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const type = (resp.headers.get('content-type') || '').toLowerCase();
+    if (!/^image\//.test(type)) throw new Error('非图片类型：' + type);
+    const buf = await resp.arrayBuffer();
+    if (buf.byteLength > 10 * 1024 * 1024) throw new Error('图片超过 10MB');
+    const bytes = new Uint8Array(buf);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 8192, bytes.length)));
+    return 'data:' + type + ';base64,' + btoa(bin);
+  }
+
+  /**
+   * 把 Markdown 里的外链图逐张重传到目标平台（uploadOne(dataUrl, fileName) -> {url}）。
+   * 逐张独立容错：单张失败仅保留该张原链接并记日志，绝不让整篇填充失败。
+   * 平台自有图 / 公式图（codecogs）/ dataURL 自动跳过。
+   */
+  async function rehostMdImages(md, uploadOne, log, mapOut) {
+    const skipRe = /mmbiz\.qpic\.cn|zhimg\.com|hdslb\.com|csdnimg\.cn|codecogs|i\.loli\.net|sinaimg|gtimg\.cn|bdimg|data:image/i;
+    const urls = extractMdImages(md).filter((u) => !skipRe.test(u));
+    if (!urls.length) return md;
+    const uniq = Array.from(new Set(urls));
+    const map = {};
+    for (const url of uniq) {
+      try {
+        let dataUrl = null;
+        try { dataUrl = await fetchImageAsDataUrl(url); } catch (_) { /* CORS 拒绝时走后台兜底 */ }
+        if (!dataUrl) {
+          const r = await chrome.runtime.sendMessage({ type: 'DOWNLOAD_IMAGE', url: url });
+          if (r && r.ok) dataUrl = r.dataUrl;
+        }
+        if (!dataUrl) throw new Error('图片下载失败（目标站无跨域许可且后台未授权）');
+        const up = await uploadOne(dataUrl, ((url.split('/').pop() || 'image.png').split('?')[0]) || 'image.png');
+        if (!up || !up.url) throw new Error('平台未返回图片地址');
+        map[url] = up.url;
+        if (mapOut) mapOut[url] = up.url;
+        if (log) log('info', '图片重传成功：' + url + ' → ' + up.url);
+      } catch (e) {
+        if (log) log('warn', '图片重传失败（保留原链接）：' + url + ' — ' + ((e && e.message) || e));
+      }
+    }
+    return Object.keys(map).length ? replaceMdImages(md, map) : md;
+  }
+
   self.__MULTIPOST_UTIL__ = {
     sleep, waitFor, firstExisting, setNativeValue, htmlToText, firePaste,
     escapeHtml, normalizeMd, miniMdToHtml, mdToHtml, mdToHtmlNoBreaks, compactHtml,
@@ -911,6 +982,7 @@
     findCodeMirror6Views, tryCodeMirror6, fillRichText, fillMarkdown, fillTitle,
     fillViaMainWorld, fillViaMainWorldRich, copyToClipboard, copyRichToClipboard,
     hoistNestedLists, latexMdToImg,
+    extractMdImages, replaceMdImages, replaceHtmlImgUrls, fetchImageAsDataUrl, rehostMdImages,
     // MathJax 公式渲染（mdnice 同款：内联 SVG），common/formulas.js 提供
     latexMdToRich: (md) => (self.MULTIPOST_FORMULAS
       ? self.MULTIPOST_FORMULAS.latexMdToRich(md)

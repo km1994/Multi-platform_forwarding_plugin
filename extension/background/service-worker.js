@@ -656,6 +656,56 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
       break;
 
+    case 'DOWNLOAD_IMAGE':
+      // 后台下载外链图 → dataURL（供适配器把图片直传到平台自有图床）。
+      // 页面侧 fetch（带 CORS）是第一选择，此处兜底：仅当已授予对应站点宿主权限时可用。
+      (async () => {
+        try {
+          const u = new URL(msg.url);
+          let granted = false;
+          try { granted = await chrome.permissions.contains({ origins: [u.origin + '/*'] }); } catch (_) { /* ignore */ }
+          if (!granted) return sendResponse({ ok: false, error: '未授权站点 ' + u.origin });
+          const resp = await fetch(msg.url, { credentials: 'omit' });
+          if (!resp.ok) return sendResponse({ ok: false, error: 'HTTP ' + resp.status });
+          const type = (resp.headers.get('content-type') || '').toLowerCase();
+          if (!/^image\//.test(type)) return sendResponse({ ok: false, error: '非图片：' + type });
+          const buf = await resp.arrayBuffer();
+          if (buf.byteLength > 10 * 1024 * 1024) return sendResponse({ ok: false, error: '图片超过 10MB' });
+          const bytes = new Uint8Array(buf);
+          let bin = '';
+          for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 8192, bytes.length)));
+          sendResponse({ ok: true, dataUrl: 'data:' + type + ';base64,' + btoa(bin) });
+        } catch (e) {
+          sendResponse({ ok: false, error: String((e && e.message) || e) });
+        }
+      })();
+      return true;
+
+    case 'GET_WEIXIN_UPLOAD_CTX':
+      // 读取公众号编辑页的上传凭证（wx.commonData 在页面主世界，隔离环境读不到，
+      // 借 chrome.scripting 以 MAIN 世界执行一次性快照读取）
+      (async () => {
+        try {
+          const tabId = sender && sender.tab && sender.tab.id;
+          if (!tabId) return sendResponse({ ok: false, error: '无来源标签页' });
+          const [res] = await chrome.scripting.executeScript({
+            target: { tabId: tabId },
+            world: 'MAIN',
+            func: () => {
+              try {
+                const d = (window.wx && window.wx.commonData && window.wx.commonData.data) || null;
+                if (!d || !d.ticket) return { ok: false, error: '页面缺少 wx.commonData 上传凭证（不在公众号编辑页？）' };
+                return { ok: true, uin: d.uin, ticket: d.ticket, token: d.token };
+              } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+            }
+          });
+          sendResponse((res && res.result) || { ok: false, error: '注入失败' });
+        } catch (e) {
+          sendResponse({ ok: false, error: String((e && e.message) || e) });
+        }
+      })();
+      return true;
+
     case 'GET_FILL_TASK': {
       // 仅当该标签页确实由当前任务打开时，才下发任务
       loadJob().then((j) => {

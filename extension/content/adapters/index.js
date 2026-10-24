@@ -12,6 +12,282 @@
   'use strict';
   const U = self.__MULTIPOST_UTIL__;
 
+  /* ============ 图片直传（平台自有图床）＝ 新增能力；任一环节失败一律回退原文，绝不影响既有填充 ============ */
+
+  /** 适配器日志：写入插件诊断日志 + 控制台（fire-and-forget） */
+  function adapterLog(platform, level, message) {
+    try { (level === 'error' ? console.error : console.log)('[MultiPost/' + platform + '] ' + message); } catch (_) { /* ignore */ }
+    try { chrome.runtime.sendMessage({ type: 'LOG', level: level || 'info', platform: platform, message: message }); } catch (_) { /* ignore */ }
+  }
+
+  /** dataURL → Blob（上传用） */
+  function mpDataUrlToBlob(dataUrl) {
+    const m = /^data:([^;,]+)(;base64)?,([\s\S]*)$/.exec(dataUrl);
+    if (!m) throw new Error('dataURL 解析失败');
+    const type = m[1] || 'application/octet-stream';
+    if (m[2]) {
+      const bin = atob(m[3]);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      return new Blob([arr], { type: type });
+    }
+    return new Blob([decodeURIComponent(m[3])], { type: type });
+  }
+
+  /** 公众号：上传到微信素材接口 → mmbiz.qpic.cn（发布时不会被剥外链）。
+   *  凭证（uin/ticket/token）由后台从页面主世界 wx.commonData 读取（GET_WEIXIN_UPLOAD_CTX） */
+  async function uploadImageToWeixin(dataUrl, fileName) {
+    const cred = await chrome.runtime.sendMessage({ type: 'GET_WEIXIN_UPLOAD_CTX' });
+    if (!cred || !cred.ok) throw new Error((cred && cred.error) || '无法获取公众号上传凭证');
+    const fd = new FormData();
+    fd.append('file', mpDataUrlToBlob(dataUrl), fileName || 'image.png');
+    const ts = Math.floor(Date.now() / 1000);
+    const url = 'https://mp.weixin.qq.com/cgi-bin/filetransfer?action=upload_material&f=json&scene=8&writetype=doublewrite&groupid=1'
+      + '&ticket_id=' + encodeURIComponent(cred.uin || '')
+      + '&ticket=' + encodeURIComponent(cred.ticket)
+      + '&svr_time=' + ts
+      + '&token=' + encodeURIComponent(cred.token || '')
+      + '&lang=zh_CN&seq=' + Date.now();
+    const resp = await fetch(url, { method: 'POST', body: fd, credentials: 'include' });
+    const txt = await resp.text();
+    let j = null;
+    try { j = JSON.parse(txt); } catch (_) { /* ignore */ }
+    const cdn = j && (j.cdn_url || (j.content && j.content.cdn_url));
+    const ret = j && j.ret;
+    if (resp.ok && cdn && (ret === undefined || ret === 0 || ret === '0')) return { url: cdn };
+    throw new Error('公众号接口返回异常 HTTP ' + resp.status + ' ' + txt.slice(0, 120));
+  }
+
+  /* ---- 纯 JS MD5（crypto.subtle 不支持 MD5，知乎 image_hash 需要）----
+     已用 Node crypto 参照验证：''/abc/43/56/64/119/200 字节等向量全部一致 */
+  function mpAdd32(a, b) { return (a + b) & 0xFFFFFFFF; }
+  function mpCmn(q, a, b, x, s, t) { a = mpAdd32(mpAdd32(a, q), mpAdd32(x, t)); return mpAdd32((a << s) | (a >>> (32 - s)), b); }
+  function mpFf(a, b, c, d, x, s, t) { return mpCmn((b & c) | ((~b) & d), a, b, x, s, t); }
+  function mpGg(a, b, c, d, x, s, t) { return mpCmn((b & d) | (c & (~d)), a, b, x, s, t); }
+  function mpHh(a, b, c, d, x, s, t) { return mpCmn(b ^ c ^ d, a, b, x, s, t); }
+  function mpIi(a, b, c, d, x, s, t) { return mpCmn(c ^ (b | (~d)), a, b, x, s, t); }
+  function mpMd5Cycle(x, k) {
+    let a = x[0], b = x[1], c = x[2], d = x[3];
+    a = mpFf(a, b, c, d, k[0], 7, -680876936); d = mpFf(d, a, b, c, k[1], 12, -389564586); c = mpFf(c, d, a, b, k[2], 17, 606105819); b = mpFf(b, c, d, a, k[3], 22, -1044525330);
+    a = mpFf(a, b, c, d, k[4], 7, -176418897); d = mpFf(d, a, b, c, k[5], 12, 1200080426); c = mpFf(c, d, a, b, k[6], 17, -1473231341); b = mpFf(b, c, d, a, k[7], 22, -45705983);
+    a = mpFf(a, b, c, d, k[8], 7, 1770035416); d = mpFf(d, a, b, c, k[9], 12, -1958414417); c = mpFf(c, d, a, b, k[10], 17, -42063); b = mpFf(b, c, d, a, k[11], 22, -1990404162);
+    a = mpFf(a, b, c, d, k[12], 7, 1804603682); d = mpFf(d, a, b, c, k[13], 12, -40341101); c = mpFf(c, d, a, b, k[14], 17, -1502002290); b = mpFf(b, c, d, a, k[15], 22, 1236535329);
+    a = mpGg(a, b, c, d, k[1], 5, -165796510); d = mpGg(d, a, b, c, k[6], 9, -1069501632); c = mpGg(c, d, a, b, k[11], 14, 643717713); b = mpGg(b, c, d, a, k[0], 20, -373897302);
+    a = mpGg(a, b, c, d, k[5], 5, -701558691); d = mpGg(d, a, b, c, k[10], 9, 38016083); c = mpGg(c, d, a, b, k[15], 14, -660478335); b = mpGg(b, c, d, a, k[4], 20, -405537848);
+    a = mpGg(a, b, c, d, k[9], 5, 568446438); d = mpGg(d, a, b, c, k[14], 9, -1019803690); c = mpGg(c, d, a, b, k[3], 14, -187363961); b = mpGg(b, c, d, a, k[8], 20, 1163531501);
+    a = mpGg(a, b, c, d, k[13], 5, -1444681467); d = mpGg(d, a, b, c, k[2], 9, -51403784); c = mpGg(c, d, a, b, k[7], 14, 1735328473); b = mpGg(b, c, d, a, k[12], 20, -1926607734);
+    a = mpHh(a, b, c, d, k[5], 4, -378558); d = mpHh(d, a, b, c, k[8], 11, -2022574463); c = mpHh(c, d, a, b, k[11], 16, 1839030562); b = mpHh(b, c, d, a, k[14], 23, -35309556);
+    a = mpHh(a, b, c, d, k[1], 4, -1530992060); d = mpHh(d, a, b, c, k[4], 11, 1272893353); c = mpHh(c, d, a, b, k[7], 16, -155497632); b = mpHh(b, c, d, a, k[10], 23, -1094730640);
+    a = mpHh(a, b, c, d, k[13], 4, 681279174); d = mpHh(d, a, b, c, k[0], 11, -358537222); c = mpHh(c, d, a, b, k[3], 16, -722521979); b = mpHh(b, c, d, a, k[6], 23, 76029189);
+    a = mpHh(a, b, c, d, k[9], 4, -640364487); d = mpHh(d, a, b, c, k[12], 11, -421815835); c = mpHh(c, d, a, b, k[15], 16, 530742520); b = mpHh(b, c, d, a, k[2], 23, -995338651);
+    a = mpIi(a, b, c, d, k[0], 6, -198630844); d = mpIi(d, a, b, c, k[7], 10, 1126891415); c = mpIi(c, d, a, b, k[14], 15, -1416354905); b = mpIi(b, c, d, a, k[5], 21, -57434055);
+    a = mpIi(a, b, c, d, k[12], 6, 1700485571); d = mpIi(d, a, b, c, k[3], 10, -1894986606); c = mpIi(c, d, a, b, k[10], 15, -1051523); b = mpIi(b, c, d, a, k[1], 21, -2054922799);
+    a = mpIi(a, b, c, d, k[8], 6, 1873313359); d = mpIi(d, a, b, c, k[15], 10, -30611744); c = mpIi(c, d, a, b, k[6], 15, -1560198380); b = mpIi(b, c, d, a, k[13], 21, 1309151649);
+    a = mpIi(a, b, c, d, k[4], 6, -145523070); d = mpIi(d, a, b, c, k[11], 10, -1120210379); c = mpIi(c, d, a, b, k[2], 15, 718787259); b = mpIi(b, c, d, a, k[9], 21, -343485551);
+    x[0] = mpAdd32(a, x[0]); x[1] = mpAdd32(b, x[1]); x[2] = mpAdd32(c, x[2]); x[3] = mpAdd32(d, x[3]);
+  }
+  /** Uint8Array → MD5 十六进制（小端输出，与标准 md5sum 一致） */
+  function mpMd5Hex(bytes) {
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 8192) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 8192, bytes.length)));
+    }
+    const n = bin.length;
+    const st = [1732584193, -271733879, -1732584194, 271733878];
+    let i;
+    for (i = 64; i <= n; i += 64) {
+      const blk = [];
+      const seg = bin.substring(i - 64, i);
+      for (let q = 0; q < 64; q += 4) blk[q >> 2] = seg.charCodeAt(q) + (seg.charCodeAt(q + 1) << 8) + (seg.charCodeAt(q + 2) << 16) + (seg.charCodeAt(q + 3) << 24);
+      mpMd5Cycle(st, blk);
+    }
+    const rest = bin.substring(i - 64);
+    const tail = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    for (i = 0; i < rest.length; i++) tail[i >> 2] |= rest.charCodeAt(i) << ((i % 4) << 3);
+    tail[i >> 2] |= 0x80 << ((i % 4) << 3);
+    if (i > 55) { mpMd5Cycle(st, tail); for (i = 0; i < 16; i++) tail[i] = 0; }
+    tail[14] = n * 8;
+    mpMd5Cycle(st, tail);
+    const HX = '0123456789abcdef';
+    let out = '';
+    for (let w = 0; w < 4; w++) {
+      for (let j = 0; j < 4; j++) out += HX.charAt((st[w] >> (j * 8 + 4)) & 15) + HX.charAt((st[w] >> (j * 8)) & 15);
+    }
+    return out;
+  }
+
+  /** HMAC-SHA1 → base64（OSS V1 签名用；内容脚本运行在 https 安全上下文，crypto.subtle 可用） */
+  async function mpHmacSha1Base64(secret, message) {
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']);
+    const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message));
+    const u8 = new Uint8Array(mac);
+    let bin = '';
+    for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+    return btoa(bin);
+  }
+
+  /** HMAC-SHA256 → base64（CSDN bizapi 网关签名用；与 SHA-1 版仅 hash 参数不同） */
+  async function mpHmacSha256Base64(secret, message) {
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message));
+    const u8 = new Uint8Array(mac);
+    let bin = '';
+    for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+    return btoa(bin);
+  }
+
+  /** UUID v4（CSDN 网关 X-Ca-Nonce 用） */
+  function mpUuidV4() {
+    const hx = '0123456789abcdef';
+    let s = '';
+    for (let i = 0; i < 36; i++) {
+      if (i === 8 || i === 13 || i === 18 || i === 23) s += '-';
+      else if (i === 14) s += '4';
+      else if (i === 19) s += '89ab'.charAt(Math.floor(Math.random() * 4));
+      else s += hx.charAt(Math.floor(Math.random() * 16));
+    }
+    return s;
+  }
+
+  /** 知乎：注册 → OSS 签名直传 → 状态回报 → 取 src（端点已于 2026-10-24 实测全流程 200）。
+   *  与编辑器原生粘贴一致：返回第④步带签名的草稿图 URL，发布时知乎按内容 hash 重写为永久地址 */
+  async function uploadImageToZhihu(dataUrl) {
+    const blob = mpDataUrlToBlob(dataUrl);
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const hash = mpMd5Hex(bytes);
+    const ct = blob.type || 'image/png';
+    // ① 注册上传（服务端按 hash 去重，同图返回相同 image_id）
+    const r1 = await fetch('https://api.zhihu.com/images', {
+      method: 'POST', credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ image_hash: hash, source: 'article' })
+    });
+    let j1 = null;
+    try { j1 = await r1.json(); } catch (_) { /* ignore */ }
+    const tk = j1 && j1.upload_token;
+    const fk = (j1 && j1.upload_file) || {};
+    if (!r1.ok || !tk) throw new Error('知乎图片注册失败 HTTP ' + r1.status + ' ' + JSON.stringify(j1).slice(0, 120));
+    // ② OSS V1 签名直传。两个实测要点：
+    //    a) canonicalized resource 必须带 bucket 名：/zhihu-pics/<object_key>（服务端 HostId 为 zhihu-pics.oss-cn-beijing）
+    //    b) x-oss-date 同时出现在日期位与 x-oss-* 头区 —— 与 ali-oss@6.8.0 行为一致
+    const date = new Date().toUTCString();
+    const s2s = ['PUT', '', ct, date,
+      'x-oss-date:' + date,
+      'x-oss-security-token:' + tk.access_token,
+      'x-oss-user-agent:' + navigator.userAgent,
+      '/zhihu-pics/' + fk.object_key].join('\n');
+    const sig = await mpHmacSha1Base64(tk.access_key, s2s);
+    const r2 = await fetch('https://zhihu-pics-upload.zhimg.com:443/' + fk.object_key, {
+      method: 'PUT', body: blob,
+      headers: {
+        'x-oss-date': date,
+        'x-oss-user-agent': navigator.userAgent,
+        'x-oss-security-token': tk.access_token,
+        'Content-Type': ct,
+        'Authorization': 'OSS ' + tk.access_id + ':' + sig
+      }
+    });
+    if (!r2.ok) throw new Error('知乎 OSS 直传失败 HTTP ' + r2.status + ' ' + (await r2.text()).slice(0, 160));
+    // ③ 状态回报（尽力而为，失败不影响取 src）
+    try {
+      await fetch('https://api.zhihu.com/images/' + fk.image_id + '/uploading_status', {
+        method: 'PUT', credentials: 'include',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ upload_result: 'success' })
+      });
+    } catch (_) { /* ignore */ }
+    // ④ 取图片地址（含 src / original_src 等字段）
+    const r4 = await fetch('https://api.zhihu.com/images/' + fk.image_id, { credentials: 'include' });
+    let j4 = null;
+    try { j4 = await r4.json(); } catch (_) { /* ignore */ }
+    if (r4.ok && j4 && j4.src) return { url: j4.src };
+    throw new Error('知乎未返回图片地址 HTTP ' + r4.status + ' ' + JSON.stringify(j4).slice(0, 120));
+  }
+
+  /** B站：york 编辑器同款接口 upload_bfs → i0.hdslb.com/bfs/new_dyn/（端点已于 2026-10-24 实测，
+   *  旧 article-text/creative 编辑器与其 bfs/article 图床已停用）。无需 WBI 签名，最小参数即可 */
+  function mpBiliCsrf() {
+    const parts = document.cookie.split('; ');
+    for (let i = 0; i < parts.length; i++) {
+      if (parts[i].indexOf('bili_jct=') === 0) return parts[i].substring(9);
+    }
+    return '';
+  }
+  async function uploadImageToBilibili(dataUrl, fileName) {
+    const blob = mpDataUrlToBlob(dataUrl);
+    const ext = /jpe?g/.test(blob.type) ? 'jpg' : (/webp/.test(blob.type) ? 'webp' : 'png');
+    const base = String(fileName || 'image').replace(/\.[^.]+$/, '') || 'image';
+    const fd = new FormData();
+    fd.append('file_up', blob, base + '.' + ext);
+    fd.append('biz', 'new_dyn');
+    fd.append('category', 'daily');
+    fd.append('csrf', mpBiliCsrf());
+    const resp = await fetch('https://api.bilibili.com/x/dynamic/feed/draw/upload_bfs', { method: 'POST', body: fd, credentials: 'include' });
+    const txt = await resp.text();
+    let j = null;
+    try { j = JSON.parse(txt); } catch (_) { /* ignore */ }
+    const u = j && j.data && j.data.image_url;
+    if (resp.ok && j && j.code === 0 && u) return { url: u.replace('http://', 'https://') };
+    throw new Error('B站上传接口返回异常 HTTP ' + resp.status + ' ' + txt.slice(0, 120));
+  }
+
+  /** CSDN：bizapi 网关取签名 → 华为 OBS 表单直传 → i-blog.csdnimg.cn 永久链接
+   *  （端点与密钥已于 2026-10-24 实测全流程 200。签名算法自前端包 csdn-http.js 还原：
+   *  阿里云 API 网关风格 HMAC-SHA256；stringToSign 五个固定位 + 三行 x-ca-* 头 + 请求路径，
+   *  其中 Content-MD5 位与 date 位恒为空串。appKey/appSecret 硬编码于前端包 csdn-upload.js） */
+  const MP_CSDN_APP_KEY = '260196572';
+  const MP_CSDN_APP_SECRET = 't5PaqxVQpWoHgLGt7XPIvd5ipJcwJTU7';
+  const MP_CSDN_SIGN_PATH = '/resource-api/v1/image/direct/upload/signature';
+  async function uploadImageToCsdn(dataUrl) {
+    const blob = mpDataUrlToBlob(dataUrl);
+    const suffix = /jpe?g/.test(blob.type) ? 'jpeg' : (/webp/.test(blob.type) ? 'webp' : (/gif/.test(blob.type) ? 'gif' : 'png'));
+    // ① bizapi 网关签名接口（Kong 网关实现，签错返回 401 HMAC signature does not match）
+    const ts = String(Date.now());
+    const nonce = mpUuidV4();
+    const s2s = ['POST', 'application/json, text/plain, */*', '', 'application/json;charset=UTF-8', '',
+      'x-ca-key:' + MP_CSDN_APP_KEY, 'x-ca-nonce:' + nonce, 'x-ca-timestamp:' + ts, MP_CSDN_SIGN_PATH].join('\n');
+    const sig = await mpHmacSha256Base64(MP_CSDN_APP_SECRET, s2s);
+    const r1 = await fetch('https://bizapi.csdn.net' + MP_CSDN_SIGN_PATH, {
+      method: 'POST', credentials: 'include',
+      headers: {
+        'Accept': 'application/json, text/plain, */*',
+        'Content-Type': 'application/json;charset=UTF-8',
+        'x-Ca-Timestamp': ts,
+        'X-Ca-Key': MP_CSDN_APP_KEY,
+        'X-Ca-Nonce': nonce,
+        'X-Ca-Signature': sig,
+        'X-Ca-Signature-Headers': 'x-ca-key,x-ca-nonce,x-ca-timestamp'
+      },
+      body: JSON.stringify({ imageTemplate: '', appName: 'direct_blog', imageSuffix: suffix })
+    });
+    const t1 = await r1.text();
+    let j1 = null;
+    try { j1 = JSON.parse(t1); } catch (_) { /* ignore */ }
+    const d = j1 && j1.data;
+    if (!r1.ok || !d || !d.filePath) throw new Error('CSDN 签名接口异常 HTTP ' + r1.status + ' ' + t1.slice(0, 120));
+    // ② OBS 表单直传：key/policy/signature/回调字段 + x:* 自定义参数，file 必须最后；
+    //    provider=obs 用 callbackUrl/AccessKeyId（阿里云 OSS 则为 callback/OSSAccessKeyId）。
+    //    响应即 OBS 回调 JSON，data.imageUrl 为 i-blog.csdnimg.cn 永久地址
+    const fd = new FormData();
+    fd.set('key', d.filePath);
+    fd.set('policy', d.policy);
+    fd.set('signature', d.signature);
+    fd.set('callbackBody', d.callbackBody || '');
+    fd.set('callbackBodyType', d.callbackBodyType || '');
+    if (d.provider === 'obs') { fd.set('callbackUrl', d.callbackUrl || ''); fd.set('AccessKeyId', d.accessId); }
+    else { fd.set('callback', d.callbackUrl || ''); fd.set('OSSAccessKeyId', d.accessId); }
+    const cp = d.customParam || {};
+    for (const k in cp) fd.set('x:' + k, cp[k]);
+    fd.set('file', blob, 'image.' + suffix);
+    const r2 = await fetch(d.host, { method: 'POST', body: fd });
+    const t2 = await r2.text();
+    let j2 = null;
+    try { j2 = JSON.parse(t2); } catch (_) { /* ignore */ }
+    const u = j2 && j2.data && j2.data.imageUrl;
+    if (r2.ok && j2 && j2.code === 200 && u) return { url: u };
+    throw new Error('CSDN OBS 直传失败 HTTP ' + r2.status + ' ' + t2.slice(0, 120));
+  }
+
   /* ---------------- 知乎专栏 ---------------- */
   const zhihu = {
     id: 'zhihu',
@@ -33,11 +309,22 @@
       });
       // 知乎编辑器是 DraftJS：会把 <br> 解析成空段落（表现为多出好多空行）。
       // 用无 <br> 的块级 HTML（每行独立 <p>），排版紧凑。
-      // ① LaTeX 公式 → MathJax 内联 SVG（mdnice 同款；MathJax 不可用自动回退
-      //    codecogs PNG 图——知乎会拒收 SVG 外链图转存，但内联 SVG 不走转存）
+      // ① LaTeX 公式 → codecogs PNG 公式图（<img> 标签）。
+      //    0.4.11 实测：知乎 DraftJS 粘贴解析只认白名单标签（p/a/img/ul/…），
+      //    MathJax 产物是裸 <svg>，不在白名单内会被连内容整段丢弃（公式全部消失）；
+      //    <img> 在白名单内，且知乎会对它做服务器转存（codecogs PNG 实测可转存）。
+      //    latexMdToImg 为同步函数、不依赖 MathJax 加载，无公式时返回原文。
       // ② 嵌套列表转 DraftJS 兄弟结构（子 ul 提到 li 外），否则嵌套收束处被插入空行
       // ③ cleanupEmptyBlocks：粘贴后再清一遍 DraftJS 自动插入的空块（列表→标题边界）
-      const mdWithMath = await U.latexMdToRich(ctx.markdown);
+      // ⓪ 图片直传：先把文章外链图重传到知乎图床（pic*.zhimg.com）。
+      //    平台服务器转存外链失败（如 iili.io 防盗链）时由此兜底；失败自动保留原链接
+      let mdZ0 = ctx.markdown;
+      try {
+        if (U.rehostMdImages && /!\[[^\]]*\]\((https?:)/.test(mdZ0)) {
+          mdZ0 = await U.rehostMdImages(mdZ0, uploadImageToZhihu, (l, m) => adapterLog('zhihu', l, m));
+        }
+      } catch (_) { mdZ0 = ctx.markdown; }
+      const mdWithMath = U.latexMdToImg(mdZ0);
       let htmlZ = U.mdToHtmlNoBreaks(mdWithMath);
       const theme = ctx.themeId && (self.MULTIPOST_THEMES || []).find((t) => t.id === ctx.themeId);
       if (theme && self.MULTIPOST_APPLY_THEME) htmlZ = self.MULTIPOST_APPLY_THEME(htmlZ, theme);
@@ -110,9 +397,19 @@
           '#txtTitle'
         ]
       });
-      // CSDN 新版 Markdown 编辑器底层为 CodeMirror 6，优先走 CM6 实例写入
+      // CSDN 新版 Markdown 编辑器底层为 CodeMirror 6，优先走 CM6 实例写入。
+      // ⓪ 图片直传：先把文章外链图重传到 CSDN 自有图床（i-blog.csdnimg.cn）。
+      //    CSDN 服务器转存境外防盗链外链（如 iili.io）必失败 → 编辑器裂图，由此兜底；
+      //    逐张独立容错，失败自动保留原链接。CSDN 原生渲染公式，不做公式转换
+      let mdC0 = ctx.markdown;
+      const csdnImgMap = {};
+      try {
+        if (U.rehostMdImages && /!\[[^\]]*\]\((https?:)/.test(mdC0)) {
+          mdC0 = await U.rehostMdImages(mdC0, uploadImageToCsdn, (l, m) => adapterLog('csdn', l, m), csdnImgMap);
+        }
+      } catch (_) { mdC0 = ctx.markdown; }
       const body = await U.fillMarkdown({
-        markdown: ctx.markdown,
+        markdown: mdC0,
         timeout: 40000,
         selectors: [
           'textarea#editor',
@@ -127,10 +424,11 @@
       if (body.ok) {
         return { ok: title.ok, message: title.ok ? '' : title.message };
       }
-      // Markdown 模式失败 → 可能用户默认是「富文本」编辑器，兜底走富文本填充
+      // Markdown 模式失败 → 可能用户默认是「富文本」编辑器，兜底走富文本填充。
+      // 富文本里的 <img> 与 Markdown 同源，用同一份重传映射替换 src（无映射则原样保留）
       const rich = await U.fillRichText({
-        html: ctx.html,
-        text: ctx.markdown,
+        html: U.replaceHtmlImgUrls(ctx.html, csdnImgMap),
+        text: mdC0,
         timeout: 8000,
         selectors: [
           '[contenteditable="true"].editor__inner',
@@ -187,11 +485,31 @@
       });
       // 标题填完立即失焦：防止后续正文填充时焦点残留把内容写进标题框
       try { document.activeElement && document.activeElement.blur(); } catch (_) { /* ignore */ }
+      // ⓪ 图片直传：先把文章外链图重传为公众号素材（mmbiz.qpic.cn）。
+      //    公众号发布时会剥掉非微信域外链图，直传后图片可正常发布显示；失败自动保留原链接
+      let mdW0 = ctx.markdown;
+      try {
+        if (U.rehostMdImages && /!\[[^\]]*\]\((https?:)/.test(mdW0)) {
+          mdW0 = await U.rehostMdImages(mdW0, uploadImageToWeixin, (l, m) => adapterLog('weixin', l, m));
+        }
+      } catch (_) { mdW0 = ctx.markdown; }
       // 公式渲染：公众号不解析 LaTeX（$$...$$ 只显示源码）。转 MathJax 内联
       // SVG（mdnice 同款，随粘贴内容自带路径，无需图片转存）；MathJax 不可用
       // 自动回退 codecogs PNG 图。再按原流程生成主题 HTML（与 ctx.html 同管线）
       let htmlW = ctx.html;
-      if (/\$[\s\S]/.test(ctx.markdown) && U.latexMdToRich && U.mdToHtml) {
+      if (mdW0 !== ctx.markdown) {
+        // 有图片被重传：基于新 markdown 重算富文本（公式转换 + 主题全部补齐）
+        try {
+          let mdW = mdW0;
+          if (/\$[\s\S]/.test(mdW) && U.latexMdToRich && U.mdToHtml) {
+            const c = await U.latexMdToRich(mdW);
+            if (c && c !== mdW) mdW = c;
+          }
+          htmlW = U.mdToHtml(mdW);
+          const theme = ctx.themeId && (self.MULTIPOST_THEMES || []).find((t) => t.id === ctx.themeId);
+          if (theme && self.MULTIPOST_APPLY_THEME) htmlW = self.MULTIPOST_APPLY_THEME(htmlW, theme);
+        } catch (_) { htmlW = ctx.html; }
+      } else if (/\$[\s\S]/.test(ctx.markdown) && U.latexMdToRich && U.mdToHtml) {
         try {
           const mdW = await U.latexMdToRich(ctx.markdown);
           if (mdW !== ctx.markdown) {
@@ -270,8 +588,12 @@
           '.title-input textarea'
         ]
       });
+      // 公式预处理：头条编辑器不解析 LaTeX（实测 $$...$$ 原样显示为源码文本），
+      // 先把公式转成 codecogs PNG 公式图（<img> 标签，富文本编辑器普遍接受）；
+      // 无公式时 latexMdToImg 返回原文，仍走 ctx.html 保持旧行为逐字节不变
+      const mdT = U.latexMdToImg(ctx.markdown);
       const rich = await U.fillRichText({
-        html: ctx.html,
+        html: mdT !== ctx.markdown ? U.mdToHtmlNoBreaks(mdT) : ctx.html,
         text: ctx.markdown,
         directHtml: true,
         selectors: [
@@ -338,9 +660,12 @@
         timeout: 8000,
         finder: jianshuTitleFinder
       });
+      // 公式预处理：简书编辑器（Markdown/富文本两种模式）都不渲染 LaTeX，
+      // 先把公式转成 codecogs PNG 公式图；无公式时返回原文，行为不变
+      const mdJ = U.latexMdToImg(ctx.markdown);
       // 先按 Markdown 编辑器填；失败再按富文本编辑器兜底
       const body = await U.fillMarkdown({
-        markdown: ctx.markdown,
+        markdown: mdJ,
         selectors: [
           'textarea#arthur-editor',
           'textarea.note-edit',
@@ -352,7 +677,7 @@
       }).then(async (res) => {
         if (res.ok) return res;
         const rich = await U.fillRichText({
-          html: ctx.htmlNoBr || ctx.html,
+          html: mdJ !== ctx.markdown ? U.mdToHtmlNoBreaks(mdJ) : (ctx.htmlNoBr || ctx.html),
           text: ctx.markdown,
           timeout: 8000,
           directHtml: true,
@@ -492,8 +817,28 @@
         timeout: 20000
       });
       // york 编辑器为自研块编辑器（contenteditable），合成 paste 识别；Quill 兜底
+      // ⓪ 图片直传：先把文章外链图重传到 B站图床（hdslb.com/bfs/article），
+      //    平台拒收外链图时由此兜底；失败自动保留原链接
+      let mdB0 = ctx.markdown;
+      try {
+        if (U.rehostMdImages && /!\[[^\]]*\]\((https?:)/.test(mdB0)) {
+          mdB0 = await U.rehostMdImages(mdB0, uploadImageToBilibili, (l, m) => adapterLog('bilibili', l, m));
+        }
+      } catch (_) { mdB0 = ctx.markdown; }
+      // 公式预处理：york 编辑器不解析 LaTeX，先转 codecogs PNG 公式图；
+      // 无公式且无重传时返回原文，仍走原 html 保持旧行为不变
+      const mdB = U.latexMdToImg(mdB0);
+      let htmlB;
+      if (mdB !== ctx.markdown) {
+        htmlB = U.mdToHtmlNoBreaks(mdB);
+        // 重算的 HTML 必须补套主题（v9 §2.1：公式/重传分支都要补），否则主题样式丢失
+        const themeB = ctx.themeId && (self.MULTIPOST_THEMES || []).find((t) => t.id === ctx.themeId);
+        if (themeB && self.MULTIPOST_APPLY_THEME) htmlB = self.MULTIPOST_APPLY_THEME(htmlB, themeB);
+      } else {
+        htmlB = ctx.htmlNoBr || ctx.html;
+      }
       const rich = await U.fillRichText({
-        html: ctx.htmlNoBr || ctx.html,
+        html: htmlB,
         text: ctx.markdown,
         directHtml: true,
         selectors: [
@@ -535,8 +880,11 @@
         finder: baijiahaoTitleFinder
       });
       // 百家号图文编辑器为自研富文本（contenteditable），合成 paste 多数可识别
+      // 公式预处理：百家号不解析 LaTeX（实测 $$...$$ 原样显示），先转 PNG 公式图；
+      // 无公式时 latexMdToImg 返回原文，仍走原 html 保持旧行为不变
+      const mdBj = U.latexMdToImg(ctx.markdown);
       const rich = await U.fillRichText({
-        html: ctx.htmlNoBr || ctx.html,
+        html: mdBj !== ctx.markdown ? U.mdToHtmlNoBreaks(mdBj) : (ctx.htmlNoBr || ctx.html),
         text: ctx.markdown,
         directHtml: true,
         selectors: [
@@ -696,13 +1044,21 @@
         timeout: 25000
       }).then(async (res) => {
         if (res.ok) return res;
-        // 富文本编辑器兜底（改版后的 write-new 为自研富文本）
+        // 富文本编辑器兜底（改版后的 write-new 为自研富文本）。
+        // 0.4.11 页面存档确认：新版正文编辑器为 Tiptap/ProseMirror ——
+        //   <div contenteditable="true" id="cdc-rich-editor"
+        //        class="tiptap ProseMirror cdc-rich-editor"
+        //        data-placeholder 内容为「请输入内容」>
+        // 精确选择器放最前；Markdown/CodeMirror 落空时优先命中真实门牌号。
+        // 兜底超时 10s→20s：新编辑器挂载较慢，10s 曾不够
         const rich = await U.fillRichText({
           html: ctx.html,
           text: ctx.markdown,
-          timeout: 10000,
+          timeout: 20000,
           directHtml: true,
           selectors: [
+            '#cdc-rich-editor',
+            '.cdc-rich-editor.ProseMirror',
             'div[contenteditable="true"][class*="editor" i]',
             '.ProseMirror[contenteditable="true"]',
             'div[contenteditable="true"][data-placeholder]',

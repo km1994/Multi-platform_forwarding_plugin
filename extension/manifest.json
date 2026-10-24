@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "多平台转发助手 · MultiPost Sync",
-  "version": "0.4.9",
+  "version": "0.4.11",
   "description": "一键将同一篇文章同步到知乎、掘金、CSDN、公众号、头条、简书、博客园、B站、百家号、51CTO、开源中国、腾讯云/阿里云社区等编辑器；小红书/微博/X/抖音等走复制粘贴模式；支持多主题排版、图床、预览与诊断日志。",
   "icons": {
     "16": "icons/icon16.png",
