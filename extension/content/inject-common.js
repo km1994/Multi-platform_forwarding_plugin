@@ -917,6 +917,18 @@
     return out;
   }
 
+  /** 提取 HTML 片段里所有 <img src="..."> 的外链地址。
+   *  背景：latexMdToImg 产出的是 HTML <img> 标签（而非 Markdown ![..](..) 写法），
+   *  extractMdImages 看不见它们，导致 B站等平台的公式图转存一张都没执行（v11 实锤）。
+   *  本函数只读不写，供 rehostImages 与 Markdown 提取结果合并后统一过滤。 */
+  function extractHtmlImgUrls(md) {
+    const re = /<img[^>]*?\ssrc=["'](https?:\/\/[^"']+)["']/gi;
+    const out = [];
+    let m;
+    while ((m = re.exec(md || '')) !== null) out.push(m[1]);
+    return out;
+  }
+
   /** 按 url→新url 映射替换 Markdown 里的图片地址 */
   function replaceMdImages(md, map) {
     return String(md || '').replace(/(!\[[^\]]*\]\()(https?:\/\/[^)\s]+)(\))/g, (all, pre, url, post) =>
@@ -943,14 +955,11 @@
     return 'data:' + type + ';base64,' + btoa(bin);
   }
 
-  /**
-   * 把 Markdown 里的外链图逐张重传到目标平台（uploadOne(dataUrl, fileName) -> {url}）。
-   * 逐张独立容错：单张失败仅保留该张原链接并记日志，绝不让整篇填充失败。
-   * 平台自有图 / 公式图（codecogs）/ dataURL 自动跳过。
-   */
-  async function rehostMdImages(md, uploadOne, log, mapOut) {
-    const skipRe = /mmbiz\.qpic\.cn|zhimg\.com|hdslb\.com|csdnimg\.cn|codecogs|i\.loli\.net|sinaimg|gtimg\.cn|bdimg|data:image/i;
-    const urls = extractMdImages(md).filter((u) => !skipRe.test(u));
+  /** 内部通用：按 skipRe/onlyRe 过滤 URL 后逐张重传（rehostMdImages 与 rehostCodecogsImages 共用） */
+  async function rehostImages(md, uploadOne, log, mapOut, { skipRe, onlyRe } = {}) {
+    let urls = extractMdImages(md).concat(extractHtmlImgUrls(md));
+    if (skipRe) urls = urls.filter((u) => !skipRe.test(u));
+    if (onlyRe) urls = urls.filter((u) => onlyRe.test(u));
     if (!urls.length) return md;
     const uniq = Array.from(new Set(urls));
     const map = {};
@@ -972,7 +981,176 @@
         if (log) log('warn', '图片重传失败（保留原链接）：' + url + ' — ' + ((e && e.message) || e));
       }
     }
-    return Object.keys(map).length ? replaceMdImages(md, map) : md;
+    if (!Object.keys(map).length) return md;
+    return replaceHtmlImgUrls(replaceMdImages(md, map), map);
+  }
+
+  /**
+   * 把 Markdown 里的外链图逐张重传到目标平台（uploadOne(dataUrl, fileName) -> {url}）。
+   * 逐张独立容错：单张失败仅保留该张原链接并记日志，绝不让整篇填充失败。
+   * 平台自有图 / 公式图（codecogs）/ dataURL 自动跳过。
+   */
+  async function rehostMdImages(md, uploadOne, log, mapOut) {
+    return rehostImages(md, uploadOne, log, mapOut, {
+      skipRe: /mmbiz\.qpic\.cn|zhimg\.com|hdslb\.com|csdnimg\.cn|codecogs|i\.loli\.net|sinaimg|gtimg\.cn|bdimg|data:image/i
+    });
+  }
+
+  /**
+   * 只重传公式图（codecogs PNG）。B站等平台可能拒收 codecogs 外链（防盗链），
+   * 与正文图共用同一 uploadOne（平台图床上传函数）；失败保留原链接。
+   */
+  async function rehostCodecogsImages(md, uploadOne, log, mapOut) {
+    return rehostImages(md, uploadOne, log, mapOut, { onlyRe: /latex\.codecogs\.com/i });
+  }
+
+  /* ============ 统一「封面 + 标签」设置（尽力而为，失败不影响正文填充） ============ */
+
+  /** dataURL → File（封面塞进 <input type=file> 用） */
+  function dataUrlToFile(dataUrl, name) {
+    const m = /^data:([^;,]+)?(;base64)?,([\s\S]*)$/.exec(dataUrl || '');
+    if (!m || !m[3]) throw new Error('封面 dataURL 解析失败');
+    const type = m[1] || 'image/png';
+    let blob;
+    if (m[2]) {
+      const bin = atob(m[3]);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      blob = new Blob([arr], { type });
+    } else {
+      blob = new Blob([decodeURIComponent(m[3])], { type });
+    }
+    return new File([blob], name || 'cover.png', { type });
+  }
+
+  /** 在顶层文档与同源 iframe 里找可见、叶子级、文本匹配、面积适中的"按钮类"元素 */
+  function findButtonByText(re) {
+    let best = null;
+    let bestArea = Infinity;
+    const scan = (doc) => {
+      try {
+        for (const el of doc.querySelectorAll('button,[role="button"],a,div,span,label,p')) {
+          const t = (el.textContent || '').trim();
+          if (!t || t.length > 12 || !re.test(t) || el.children.length > 2) continue;
+          const r = el.getBoundingClientRect();
+          if (r.width < 20 || r.height < 14 || r.width > 420 || r.height > 90 || !isVisible(el)) continue;
+          const area = r.width * r.height;
+          if (area < bestArea) { best = el; bestArea = area; }
+        }
+      } catch (_) { /* ignore */ }
+    };
+    scan(document);
+    try {
+      for (const f of document.querySelectorAll('iframe')) {
+        try { if (f.contentDocument) scan(f.contentDocument); } catch (_) { /* cross-origin */ }
+      }
+    } catch (_) { /* ignore */ }
+    return best;
+  }
+
+  /** 把 File 塞进页面（含同源 iframe）的图片 <input type=file> 并派发 change（等价人工选图） */
+  async function attachFileToImageInput(file) {
+    const inputs = [];
+    const collect = (doc) => { try { doc.querySelectorAll('input[type="file"]').forEach((i) => inputs.push(i)); } catch (_) { /* ignore */ } };
+    collect(document);
+    try {
+      for (const f of document.querySelectorAll('iframe')) {
+        try { if (f.contentDocument) collect(f.contentDocument); } catch (_) { /* cross-origin */ }
+      }
+    } catch (_) { /* ignore */ }
+    const pick = inputs.find((i) => /image/i.test(i.getAttribute('accept') || '')) || inputs[0];
+    if (!pick) return false;
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    pick.files = dt.files;
+    pick.dispatchEvent(new Event('input', { bubbles: true }));
+    pick.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  }
+
+  /**
+   * 统一封面 + 标签设置（DOM 型，平台无关）：
+   * - coverDataUrl 有值：先 coverUploader 上传拿平台内链（可选），再找页面"封面/头图"
+   *   入口点击，给弹出的 <input type=file> 塞文件；
+   * - tags 非空：找"话题/标签"输入框逐个输入 + 回车。
+   * 任一步失败只记 warn 并把附注写进返回消息，绝不抛错、绝不影响正文填充结果。
+   */
+  async function fillCoverAndTags({ coverDataUrl, coverUploader, tags, log }) {
+    const notes = [];
+    if (coverDataUrl) {
+      try {
+        let uploadedUrl = null;
+        if (coverUploader) {
+          try {
+            const up = await coverUploader(coverDataUrl, 'cover.png');
+            uploadedUrl = up && up.url;
+          } catch (e) {
+            if (log) log('warn', '封面上传平台图床失败（改用直接选图）：' + ((e && e.message) || e));
+          }
+        }
+        const btn = findButtonByText(/封面|头图/);
+        let attached = false;
+        if (btn) {
+          btn.click();
+          await sleep(1200);
+          attached = await attachFileToImageInput(dataUrlToFile(coverDataUrl));
+          if (!attached) attached = await attachFileToImageInput(dataUrlToFile(coverDataUrl));
+        }
+        if (attached) {
+          notes.push('封面已设置' + (uploadedUrl ? '（' + uploadedUrl.slice(0, 60) + '…）' : ''));
+          if (log) log('info', '封面已设置' + (uploadedUrl ? '：' + uploadedUrl : ''));
+        } else {
+          if (log) log('warn', btn ? '已点击封面入口但未找到图片选择框，请手动确认封面' : '未找到封面设置入口（可能无封面功能或页面改版），请手动设置');
+          notes.push('封面需手动确认');
+        }
+      } catch (e) {
+        if (log) log('warn', '封面设置失败（不影响正文）：' + ((e && e.message) || e));
+        notes.push('封面设置失败');
+      }
+    }
+    if (tags && tags.length) {
+      try {
+        let okCount = 0;
+        for (const tag of tags.slice(0, 5)) {
+          const input = document.querySelector(
+            'input[placeholder*="话题"],input[placeholder*="标签"],textarea[placeholder*="话题"],textarea[placeholder*="标签"],'
+            + 'div[contenteditable="true"][data-placeholder*="话题"],div[contenteditable="true"][data-placeholder*="标签"]');
+          if (!input) {
+            if (log) log('warn', '未找到标签/话题输入框，请手动设置标签');
+            notes.push('未找到标签入口');
+            break;
+          }
+          setNativeValue(input, tag);
+          await sleep(350);
+          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+          input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+          await sleep(450);
+          okCount++;
+        }
+        if (okCount) notes.push('已尝试设置标签 ' + okCount + ' 个');
+      } catch (e) {
+        if (log) log('warn', '标签设置失败（不影响正文）：' + ((e && e.message) || e));
+        notes.push('标签设置失败');
+      }
+    }
+    return notes.join('；');
+  }
+
+  /** 从 Markdown 取第一张外链图并下载为 dataURL（"用正文第一张图"作封面；页面 fetch → 后台兜底） */
+  async function getCoverDataUrlFromArticle(md, log) {
+    try {
+      const urls = extractMdImages(md);
+      if (!urls.length) return null;
+      const url = urls[0];
+      try { return await fetchImageAsDataUrl(url); } catch (_) { /* CORS 拒绝时走后台兜底 */ }
+      const r = await chrome.runtime.sendMessage({ type: 'DOWNLOAD_IMAGE', url: url });
+      if (r && r.ok) return r.dataUrl;
+      if (log) log('warn', '封面图下载失败：' + url);
+      return null;
+    } catch (e) {
+      if (log) log('warn', '封面图提取失败：' + ((e && e.message) || e));
+      return null;
+    }
   }
 
   self.__MULTIPOST_UTIL__ = {
@@ -983,6 +1161,7 @@
     fillViaMainWorld, fillViaMainWorldRich, copyToClipboard, copyRichToClipboard,
     hoistNestedLists, latexMdToImg,
     extractMdImages, replaceMdImages, replaceHtmlImgUrls, fetchImageAsDataUrl, rehostMdImages,
+    rehostCodecogsImages, fillCoverAndTags, getCoverDataUrlFromArticle,
     // MathJax 公式渲染（mdnice 同款：内联 SVG），common/formulas.js 提供
     latexMdToRich: (md) => (self.MULTIPOST_FORMULAS
       ? self.MULTIPOST_FORMULAS.latexMdToRich(md)

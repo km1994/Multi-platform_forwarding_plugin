@@ -33,9 +33,12 @@ async function ensureLogsLoaded() {
   logsLoaded = true;
   try {
     const o = await chrome.storage.local.get(LOG_KEY);
-    logBuf = Array.isArray(o[LOG_KEY]) ? o[LOG_KEY] : [];
+    const stored = Array.isArray(o[LOG_KEY]) ? o[LOG_KEY] : [];
+    // 合并而非替换：SW 启动最初几百毫秒内 log() 可能已经写入 logBuf（如"重启恢复"
+    // 日志），直接替换会把它们冲掉；concat 保证新旧都在
+    logBuf = stored.concat(logBuf);
   } catch (_) {
-    logBuf = [];
+    /* 读取失败时保留当前 logBuf */
   }
 }
 
@@ -44,6 +47,7 @@ async function ensureLogsLoaded() {
  * 平台失败、任务流转、图床上传结果均落日志，弹窗可一键导出 .txt 排查。
  */
 function log(level, platform, message, detail) {
+  if (!logsLoaded) ensureLogsLoaded(); // 首条日志前把上次会话的持久化日志并回来
   logBuf.push({
     t: Date.now(),
     level,
@@ -58,6 +62,7 @@ function log(level, platform, message, detail) {
 
 async function flushLogs() {
   try {
+    await ensureLogsLoaded(); // 关键：写盘前确保历史日志已并回 logBuf，否则会把旧日志覆盖掉
     await chrome.storage.local.set({ [LOG_KEY]: logBuf });
   } catch (_) { /* ignore */ }
 }
@@ -220,7 +225,7 @@ async function saveHistory() {
   } catch (_) { /* ignore */ }
 }
 
-async function startJob({ title, markdown, platformIds, themeId }) {
+async function startJob({ title, markdown, platformIds, themeId, cover, coverFromArticle, tags }) {
   await loadJob();
   if (job && job.status === 'running') {
     broadcast({ type: 'JOB_UPDATED', job: snapshot(), error: '已有同步任务在进行中' });
@@ -245,6 +250,12 @@ async function startJob({ title, markdown, platformIds, themeId }) {
     title,
     markdown,
     themeId: themeId || null,
+    // 统一「封面 + 标签」：cover 为封面图 dataURL（null=未选）；
+    // coverFromArticle=true 时由各平台适配器取正文第一张图作封面；
+    // tags 为字符串数组（popup 已规范化，最多 5 个）
+    cover: cover || null,
+    coverFromArticle: !!coverFromArticle,
+    tags: Array.isArray(tags) ? tags.slice(0, 5) : [],
     startedAt: Date.now(),
     finishedAt: null,
     status: platforms.length ? 'running' : 'done',
@@ -600,9 +611,43 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 /* ================= SW 启动恢复 ================= */
 chrome.runtime.onStartup.addListener(() => schedulePump());
-loadJob().then((j) => {
+
+/**
+ * 扩展重载后，旧标签页里的内容脚本已失联（runtime 上下文销毁）。
+ * 正在填充中的平台如果标签页已失联，直接判失败——否则每个平台都要白等
+ * 150 秒超时，期间新同步还会被"已有同步任务在进行中"挡住。
+ * 注意：MV3 Service Worker 正常休眠再唤醒时内容脚本仍存活，探测应答 pong，
+ * 不受影响（只有真正重载扩展才会失联）。
+ */
+async function reviveAfterReload(j) {
+  for (const p of j.platforms) {
+    if (p.status !== 'filling' || p.tabId == null) continue;
+    const alive = await new Promise((resolve) => {
+      let settled = false;
+      const finish = (v) => { if (!settled) { settled = true; resolve(v); } };
+      try {
+        chrome.tabs.sendMessage(p.tabId, { type: 'MP_PING' }, (r) => {
+          void chrome.runtime.lastError;
+          finish(!!(r && r.pong));
+        });
+      } catch (_) { finish(false); return; }
+      setTimeout(() => finish(false), 1500); // 探测兜底超时
+    });
+    if (!alive) {
+      p.status = 'error';
+      p.message = '扩展重载导致填充中断（标签页失联），请重新同步';
+      log('warn', p.id, p.message);
+    }
+  }
+}
+
+ensureLogsLoaded(); // 启动即加载历史日志，杜绝任何首条日志覆盖旧日志的窗口
+loadJob().then(async (j) => {
   if (j && j.status === 'running') {
     log('info', '', 'Service Worker 重启，恢复未完成的同步任务');
+    await reviveAfterReload(j);
+    await saveJob();
+    broadcastJob();
     schedulePump();
   }
 });
@@ -664,7 +709,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const u = new URL(msg.url);
           let granted = false;
           try { granted = await chrome.permissions.contains({ origins: [u.origin + '/*'] }); } catch (_) { /* ignore */ }
-          if (!granted) return sendResponse({ ok: false, error: '未授权站点 ' + u.origin });
+          if (!granted) return sendResponse({ ok: false, error: '未授权站点 ' + u.origin
+            + '（修复：chrome://extensions → 本扩展详情 → 网站访问权限 → 改为「在所有网站上」，然后重试）' });
           const resp = await fetch(msg.url, { credentials: 'omit' });
           if (!resp.ok) return sendResponse({ ok: false, error: 'HTTP ' + resp.status });
           const type = (resp.headers.get('content-type') || '').toLowerCase();
@@ -724,7 +770,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             task = {
               jobId: j.id,
               platformId: p.id,
-              article: { title: j.title, markdown: j.markdown, themeId: j.themeId || null }
+              article: {
+                title: j.title,
+                markdown: j.markdown,
+                themeId: j.themeId || null,
+                cover: j.cover || null,
+                coverFromArticle: !!j.coverFromArticle,
+                tags: Array.isArray(j.tags) ? j.tags : []
+              }
             };
           }
         }

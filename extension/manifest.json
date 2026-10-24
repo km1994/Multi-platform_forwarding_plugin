@@ -26,6 +26,10 @@
     "https://catbox.moe/*",
     "https://freeimage.host/*",
     "https://api.imgbb.com/*",
+    "https://iili.io/*",
+    "https://i.ibb.co/*",
+    "https://files.catbox.moe/*",
+    "https://latex.codecogs.com/*",
     "https://zhuanlan.zhihu.com/*",
     "https://juejin.cn/*",
     "https://editor.csdn.net/*",
@@ -39,6 +43,8 @@
     "https://my.oschina.net/*",
     "https://cloud.tencent.com/*",
     "https://developer.aliyun.com/*",
+    "https://creator.xiaohongshu.com/*",
+    "https://creator.douyin.com/*",
     "http://localhost/*",
     "http://127.0.0.1/*"
   ],
@@ -59,6 +65,8 @@
         "https://my.oschina.net/*",
         "https://cloud.tencent.com/*",
         "https://developer.aliyun.com/*",
+        "https://creator.xiaohongshu.com/*",
+        "https://creator.douyin.com/*",
         "http://localhost/*",
         "http://127.0.0.1/*"
       ],

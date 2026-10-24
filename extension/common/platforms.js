@@ -124,14 +124,16 @@
       copyFormat: 'md',
       experimental: true
     },
-    /* ---- 复制模式：内容进剪贴板，打开页面后手动粘贴 ---- */
+    /* ---- 复制模式：内容进剪贴板，打开页面后手动粘贴（微博/X/Facebook 等） ---- */
+    /* ---- 小红书长文（实验性自动填充；失败自动降级为复制兜底） ---- */
     {
       id: 'xiaohongshu',
-      name: '小红书',
+      name: '小红书长文',
       color: '#ff2442',
       editorUrl: 'https://creator.xiaohongshu.com/publish/publish?source=official',
       hosts: ['creator.xiaohongshu.com'],
-      mode: 'copy',
+      mode: 'fill',
+      copyFormat: 'md',
       experimental: true
     },
     {
@@ -161,13 +163,15 @@
       mode: 'copy',
       experimental: true
     },
+    /* ---- 抖音长文（实验性；长文页为 creator-micro/content/post/article） ---- */
     {
       id: 'douyin',
-      name: '抖音',
+      name: '抖音长文',
       color: '#161823',
-      editorUrl: 'https://creator.douyin.com/creator-micro/content/publish',
+      editorUrl: 'https://creator.douyin.com/creator-micro/content/post/article',
       hosts: ['creator.douyin.com'],
-      mode: 'copy',
+      mode: 'fill',
+      copyFormat: 'md',
       experimental: true
     },
     {

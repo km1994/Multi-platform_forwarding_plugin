@@ -827,7 +827,13 @@
       } catch (_) { mdB0 = ctx.markdown; }
       // 公式预处理：york 编辑器不解析 LaTeX，先转 codecogs PNG 公式图；
       // 无公式且无重传时返回原文，仍走原 html 保持旧行为不变
-      const mdB = U.latexMdToImg(mdB0);
+      let mdB = U.latexMdToImg(mdB0);
+      // 公式图也直传：B站可能拒收 codecogs 外链（防盗链），与正文图同一上传函数
+      try {
+        if (U.rehostCodecogsImages && mdB !== mdB0 && /latex\.codecogs\.com/.test(mdB)) {
+          mdB = await U.rehostCodecogsImages(mdB, uploadImageToBilibili, (l, m) => adapterLog('bilibili', l, m));
+        }
+      } catch (_) { /* 失败保留 codecogs 原链接，继续原有流程 */ }
       let htmlB;
       if (mdB !== ctx.markdown) {
         htmlB = U.mdToHtmlNoBreaks(mdB);
@@ -1065,7 +1071,9 @@
             'div[contenteditable="true"]'
           ]
         });
-        return rich.ok ? rich : res;
+        // 两种编辑器都落空时合并两路消息：只透传 Markdown 一路的"未找到 Markdown
+        // 编辑器"会掩盖富文本兜底的真实失败原因（页面可编辑元素诊断串在 rich.message 里）
+        return rich.ok ? rich : { ok: false, message: res.message + '；富文本兜底：' + rich.message };
       });
       return { ok: title.ok && body.ok, message: [title.ok ? '' : title.message, body.ok ? '' : body.message].filter(Boolean).join('；') };
     }
@@ -1144,8 +1152,140 @@
     }
   };
 
+  /* ---------------- 小红书长文（实验性） ---------------- */
+  const xiaohongshu = {
+    id: 'xiaohongshu',
+    name: '小红书长文',
+    hosts: ['creator.xiaohongshu.com'],
+    experimental: true,
+    async fill(ctx) {
+      // 未登录会跳登录页
+      if (/login/.test(location.href)) {
+        return { ok: false, message: '小红书未登录，请先登录 creator.xiaohongshu.com 后重试' };
+      }
+      // 创作平台默认落在"上传视频"tab，需要切到「写长文」
+      const tab = await U.waitFor(() => {
+        const els = document.querySelectorAll('div,span,[role="tab"]');
+        for (const e of els) {
+          const t = (e.textContent || '').trim();
+          if (t === '写长文' || t === '长文') {
+            try { return U.isVisible(e) && e.children.length === 0 ? e : null; } catch (_) { return null; }
+          }
+        }
+        return null;
+      }, { timeout: 8000 });
+      if (tab) { try { tab.click(); } catch (_) { /* ignore */ } await U.sleep(1800); }
+      const title = await U.fillTitle({
+        title: ctx.title,
+        selectors: [
+          'input[placeholder*="标题"]',
+          'textarea[placeholder*="标题"]',
+          'input[placeholder*="输入标题"]',
+          'div[contenteditable="true"][class*="title" i]'
+        ],
+        timeout: 15000
+      });
+      // 长文正文为富文本 contenteditable（Quill/TipTap 系）；选择器全部落空时
+      // fillRichText 内部还有"深度发现"兜底（枚举全页可编辑元素逐个试粘贴）
+      const rich = await U.fillRichText({
+        html: ctx.htmlNoBr || ctx.html,
+        text: ctx.markdown,
+        directHtml: true,
+        timeout: 20000,
+        selectors: [
+          '.ql-editor[contenteditable="true"]',
+          '.ProseMirror[contenteditable="true"]',
+          'div[contenteditable="true"][data-placeholder]',
+          'div[contenteditable="true"][class*="editor" i]',
+          'div[contenteditable="true"]'
+        ]
+      });
+      return { ok: title.ok && rich.ok, message: [title.ok ? '' : title.message, rich.ok ? '' : rich.message].filter(Boolean).join('；') };
+    }
+  };
+
+  /* ---------------- 抖音长文（实验性） ---------------- */
+  const douyin = {
+    id: 'douyin',
+    name: '抖音长文',
+    hosts: ['creator.douyin.com'],
+    experimental: true,
+    async fill(ctx) {
+      // 抖音偶尔要求手机号/账号安全验证（CSDN 同步助手同样处理过该拦截页）
+      const pageText = (document.body && document.body.innerText) || '';
+      if (/verification/.test(location.href) || /完成安全验证|安全验证/.test(pageText.slice(0, 800))) {
+        return { ok: false, message: '抖音要求安全验证，请人工完成验证后在本页重新同步' };
+      }
+      // 不在长文页则先路由过去（跳转后新页面的内容脚本会重新领任务继续填）
+      if (!/post\/article/.test(location.pathname)) {
+        location.href = 'https://creator.douyin.com/creator-micro/content/post/article';
+        return { ok: false, silent: true, message: '正在进入抖音长文编辑页…' };
+      }
+      const title = await U.fillTitle({
+        title: ctx.title,
+        selectors: [
+          'input[placeholder*="标题"]',
+          'textarea[placeholder*="标题"]',
+          'div[contenteditable="true"][class*="title" i]'
+        ],
+        timeout: 20000
+      });
+      const rich = await U.fillRichText({
+        html: ctx.htmlNoBr || ctx.html,
+        text: ctx.markdown,
+        directHtml: true,
+        timeout: 20000,
+        selectors: [
+          '.ProseMirror[contenteditable="true"]',
+          '.ql-editor[contenteditable="true"]',
+          'div[contenteditable="true"][data-placeholder]',
+          'div[contenteditable="true"][class*="editor" i]',
+          'div[contenteditable="true"]'
+        ]
+      });
+      return { ok: title.ok && rich.ok, message: [title.ok ? '' : title.message, rich.ok ? '' : rich.message].filter(Boolean).join('；') };
+    }
+  };
+
+  /* ============ 统一「封面 + 标签」挂载（第一期：知乎 / B站 / CSDN） ============
+   * 用装饰器包一层 fill：正文填充成功后，尽力设置封面与标签。
+   * 任一环节失败只记日志并在消息里附注，绝不改变正文填充的 ok 结果。 */
+  const COVER_TAG_UPLOADERS = {
+    zhihu: uploadImageToZhihu,
+    bilibili: uploadImageToBilibili,
+    csdn: uploadImageToCsdn
+  };
+  function withCoverAndTags(adapter) {
+    const upload = COVER_TAG_UPLOADERS[adapter.id];
+    if (!upload) return adapter;
+    const rawFill = adapter.fill.bind(adapter);
+    adapter.fill = async function (ctx) {
+      const res = await rawFill(ctx);
+      if (!res || res.ok !== true) return res;
+      try {
+        if (!ctx.cover && !ctx.coverFromArticle && !(ctx.tags && ctx.tags.length)) return res;
+        let coverDataUrl = ctx.cover || null;
+        if (!coverDataUrl && ctx.coverFromArticle) {
+          coverDataUrl = await U.getCoverDataUrlFromArticle(ctx.markdown, (l, m) => adapterLog(adapter.id, l, m));
+        }
+        const note = await U.fillCoverAndTags({
+          coverDataUrl,
+          coverUploader: upload,
+          tags: ctx.tags || [],
+          log: (l, m) => adapterLog(adapter.id, l, m)
+        });
+        if (note) res.message = (res.message ? res.message + '；' : '') + note;
+      } catch (e) {
+        adapterLog(adapter.id, 'warn', '封面/标签设置异常（不影响正文）：' + ((e && e.message) || e));
+      }
+      return res;
+    };
+    return adapter;
+  }
+
   self.__MULTIPOST_ADAPTERS__ = [
     zhihu, juejin, csdn, weixin, toutiao, jianshu, cnblogs,
-    bilibili, baijiahao, cto51, oschina, tencentcloud, aliyun, demo
-  ];
+    bilibili, baijiahao, cto51, oschina, tencentcloud, aliyun,
+    xiaohongshu, douyin, demo
+  ].map(withCoverAndTags);
 })();

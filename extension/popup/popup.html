@@ -104,6 +104,25 @@
 
     <section class="card">
       <div class="label-row">
+        <span class="label">封面与标签</span>
+        <span class="label-sub">支持的平台会自动设置（知乎 / B站 / CSDN，失败不影响正文）</span>
+      </div>
+      <div class="bed-fields">
+        <div class="content-actions">
+          <button id="cover-pick" class="mini-btn" type="button">🖼 选择封面</button>
+          <button id="cover-clear" class="mini-btn" type="button" hidden>清除</button>
+          <span id="cover-name" class="label-sub">未选择封面</span>
+          <label class="apply-theme" title="未选择封面时，自动用正文第一张图作为封面">
+            <input id="cover-from-article" type="checkbox" /> 用正文第一张图
+          </label>
+          <input id="cover-input" type="file" accept="image/*" hidden />
+        </div>
+        <input id="tags-input" type="text" placeholder="标签：逗号/空格分隔，最多 5 个（如：人工智能, 深度学习）" />
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="label-row">
         <span class="label">同步平台</span>
         <span class="label-sub"><i class="dot-exp">!</i> 实验性 · <i class="dot-copy">⧉</i> 复制模式（自动复制，打开后手动粘贴）</span>
       </div>

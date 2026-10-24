@@ -8,13 +8,22 @@ const PLATFORMS = self.MULTIPOST_PLATFORMS || [];
 
 const state = {
   job: null,
-  selected: new Set()
+  selected: new Set(),
+  coverDataUrl: null,
+  coverName: ''
 };
 
 /* ---------------- 持久化草稿与勾选 ---------------- */
 const draftSave = debounce(async () => {
   await chrome.storage.local.set({
-    draft: { title: $('#title').value, markdown: $('#markdown').value },
+    draft: {
+      title: $('#title').value,
+      markdown: $('#markdown').value,
+      tags: $('#tags-input') ? $('#tags-input').value : '',
+      coverDataUrl: state.coverDataUrl,
+      coverName: state.coverName,
+      coverFromArticle: !!( $('#cover-from-article') && $('#cover-from-article').checked )
+    },
     selected: [...state.selected]
   });
 }, 400);
@@ -208,11 +217,19 @@ async function startPublish() {
 
   $('#publish').disabled = true;
   $('#publish').textContent = '同步中…';
+  // 标签规范化：去 #、去空，最多 5 个（全角逗号/顿号/空白均可分隔）
+  const tags = ($('#tags-input').value || '')
+    .split(/[,，、\s]+/).map((s) => s.replace(/^#+/, '').trim()).filter(Boolean).slice(0, 5);
   await chrome.runtime.sendMessage({
     type: 'START_JOB',
     title,
     markdown,
     themeId: $('#apply-theme').checked ? $('#theme-select').value : null,
+    // 统一「封面 + 标签」：cover 为本地选择的封面 dataURL；
+    // coverFromArticle=true 且未选封面时，由适配器取正文第一张图
+    cover: state.coverDataUrl,
+    coverFromArticle: $('#cover-from-article').checked && !state.coverDataUrl,
+    tags,
     platformIds: [...state.selected]
   });
   if (copyTip) flash('已复制内容，' + copyTip);
@@ -235,6 +252,32 @@ function flash(text) {
 function bindActions() {
   $('#title').addEventListener('input', draftSave);
   $('#markdown').addEventListener('input', draftSave);
+
+  // ---- 封面与标签 ----
+  $('#cover-pick').addEventListener('click', () => $('#cover-input').click());
+  $('#cover-input').addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      state.coverDataUrl = String(reader.result || '');
+      state.coverName = file.name;
+      $('#cover-name').textContent = '已选：' + file.name;
+      $('#cover-clear').hidden = false;
+      draftSave();
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  });
+  $('#cover-clear').addEventListener('click', () => {
+    state.coverDataUrl = null;
+    state.coverName = '';
+    $('#cover-name').textContent = '未选择封面';
+    $('#cover-clear').hidden = true;
+    draftSave();
+  });
+  $('#cover-from-article').addEventListener('change', draftSave);
+  $('#tags-input').addEventListener('input', draftSave);
 
   $('#publish').addEventListener('click', startPublish);
 
@@ -613,6 +656,15 @@ chrome.runtime.onMessage.addListener((msg) => {
   const { draft = {}, selected = null } = await chrome.storage.local.get(['draft', 'selected']);
   $('#title').value = draft.title || '';
   $('#markdown').value = draft.markdown || '';
+  // 恢复封面/标签草稿
+  if (draft.tags) $('#tags-input').value = draft.tags;
+  if (draft.coverDataUrl) {
+    state.coverDataUrl = draft.coverDataUrl;
+    state.coverName = draft.coverName || 'cover.png';
+    $('#cover-name').textContent = '已选：' + state.coverName;
+    $('#cover-clear').hidden = false;
+  }
+  if (draft.coverFromArticle) $('#cover-from-article').checked = true;
   if (Array.isArray(selected)) state.selected = new Set(selected);
   else state.selected = new Set(['juejin', 'csdn']); // 默认勾选两个稳定平台
 

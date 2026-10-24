@@ -11,6 +11,15 @@
   if (window.__MULTIPOST_MAIN__) return; // 防重复注入
   window.__MULTIPOST_MAIN__ = true;
 
+  // 后台探测本标签页内容脚本是否存活（扩展重载后旧脚本失联，
+  // background 用它快速判失败，避免每平台白等 150 秒超时）
+  try {
+    chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+      if (msg && msg.type === 'MP_PING') sendResponse({ pong: true });
+      return false; // 同步应答，无需保持消息端口
+    });
+  } catch (_) { /* ignore */ }
+
   const U = self.__MULTIPOST_UTIL__;
   const ADAPTERS = self.__MULTIPOST_ADAPTERS__ || [];
   const THEMES = self.MULTIPOST_THEMES || [];
@@ -204,7 +213,11 @@
         markdown,
         html,
         htmlNoBr,
-        themeId: task.article.themeId
+        themeId: task.article.themeId,
+        // 统一「封面 + 标签」：适配器里由 withCoverAndTags 消费（尽力而为，不影响正文）
+        cover: task.article.cover || null,
+        coverFromArticle: !!task.article.coverFromArticle,
+        tags: Array.isArray(task.article.tags) ? task.article.tags : []
       });
     } catch (err) {
       result = { ok: false, message: '填充异常：' + (err && err.message ? err.message : String(err)) };
